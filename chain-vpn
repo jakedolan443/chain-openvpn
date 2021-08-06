@@ -1,0 +1,135 @@
+#!/bin/python3
+import sys
+import os, os.path
+import subprocess
+import time
+import signal
+
+
+class Daemon:
+    def __init__(self):
+        signal.signal(signal.SIGINT, self.end_session)
+        self.__set_log_level()
+        self.__check_permissions()
+        self.__check_conf_exists()
+        self.__check_conf_exists("/sbin/openvpn")
+        self.conf_files = self.__load_conf_files()
+        self.tun_number = 0
+        self.log(0, "Attempting to connect VPN configurations ...")
+        for configuration in self.conf_files:
+            time.sleep(0.5)
+            self.__add_connection(configuration)
+        signal.pause()
+            
+    def log(self, log_level, string, **kwargs):
+        if log_level <= self.log_level:
+            print(string, **kwargs)
+        
+    def error(self, string):
+        print("ERROR:  {}".format(string))
+        exit()
+        
+    def __set_log_level(self):
+        self.log_level = 0
+        if "-v" in sys.argv:
+            self.log_level = 1
+        elif "-vv" in sys.argv:
+            self.log_level = 2
+        elif "-vvv" in sys.argv:
+            self.log_level = 3
+        elif "-h" in sys.argv:
+            print("USAGE: ./chain-vpn\n  place configuration files into connect.conf\n  verbose modes can be activated with -v, -vv, -vvv")
+            exit()
+        self.log(1,"started chain-vpn with verbose level {}".format(self.log_level))
+        
+    def __check_permissions(self):
+        self.log(2, "checking permissions ...")
+        self.log(3, "running `os.geteuid()`")
+        if os.geteuid() != 0:
+            self.log(3, "did not return 0, permission check failed!")
+            self.error("Insufficient Permissions! Run with root.")
+        self.log(2, "permissions check successful!")
+            
+    def __check_conf_exists(self, configuration="connect.conf"):
+        self.log(3, "checking {} exists ...".format(configuration))
+        if not os.path.isfile("{}".format(configuration)):
+            self.log(3, "could not find {}".format(configuration))
+            self.error("Configuration file '{}' could not be found.".format(configuration))
+        self.log(3, "found {}".format(configuration))
+            
+    def __load_conf_files(self):
+        self.log(2, "loading configuration file 'connect.conf'")
+        conf_files = []
+        with open("connect.conf", "r") as f:
+            data = f.read().split("\n")
+        for line in data:
+            if len(line) > 0:
+                if not line[0] in "#":
+                    self.__check_conf_exists(configuration=line)
+                    conf_files.append(line)
+        self.log(1, "loaded configuration files ...")
+        return conf_files
+                
+    def get_ip_from_file(self, filename):
+        try:
+            with open(filename, "r") as f:
+                data = f.read()
+            data = data.split("\n")
+            for line in data:
+                line = line.split(" ")
+                if line[0] in "remote":
+                    return line[1]
+        except Exception:
+            return "?.?.?.?"
+        
+    def ask_continue(self):
+        ask = input("  skip this configuration? [Y/n]  ")
+        if not ask.lower() in "y":
+            self.log(0, "Aborted.")
+            exit()
+            
+    def end_session(self, sig, frame):
+        process = subprocess.Popen("/usr/bin/killall openvpn > /dev/null 2>&1", shell=True, stdout=subprocess.PIPE)
+        self.log(0, "\nKilled.")
+        exit()
+                
+    def __add_connection(self, configuration):
+        self.log(1, "attempting to connect with {}".format(configuration))
+        args = "--dev tun{}".format(self.tun_number)
+        ip_address = self.get_ip_from_file(configuration)
+        if self.log_level == 0:
+            self.log(0, '{} ({})\t \033[90m. . .\033[0m'.format(configuration, ip_address), end='\r')
+        if not len(self.conf_files)-1 == self.tun_number:
+            args += " --route-nopull"
+        self.log(1, "Executing `/sbin/openvpn --config {} {}`".format(configuration, args))
+        process = subprocess.Popen("/sbin/openvpn --config {} {} &".format(configuration, args), shell=True, stdout=subprocess.PIPE)
+        failed = False
+        while True:
+            output = process.stdout.readline()
+            if process.poll() is not None and output == '':
+                break
+            if output:
+                string = output.strip().decode()
+                self.log(2, string)
+                if "exiting" in string:
+                    failed = True
+                    break
+                if "restarting" in string:
+                    failed = True
+                    break
+                if "Initialization Sequence Completed" in string:
+                    break
+        if not failed:
+            self.tun_number += 1
+            self.log(1, "connected {}".format(configuration), end="")
+            if self.log_level == 0:
+                self.log(0, '\r{} ({})\t \033[0;32mConnected\033[0m'.format(configuration, ip_address))
+        else:
+            if self.log_level == 0:
+                self.log(0, '\r{} ({})\t \033[0;31mFailed\033[0m'.format(configuration, ip_address))
+                self.ask_continue()
+
+
+if __name__ == "__main__":
+    daemon = Daemon()
+
